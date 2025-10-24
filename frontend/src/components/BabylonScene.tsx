@@ -7,6 +7,7 @@ import {
   Vector3,
   Color4,
   MeshBuilder,
+  Camera,
 } from '@babylonjs/core';
 import { GridMaterial } from '@babylonjs/materials/grid';
 import '@babylonjs/core/Materials/standardMaterial';
@@ -32,10 +33,11 @@ export const BabylonScene: React.FC<BabylonSceneProps> = ({ onSceneReady, onRend
     scene.clearColor = new Color4(0.95, 0.95, 0.95, 1);
 
     // Camera - configured for Z-up coordinate system (our extrusion direction)
+    // Start with top view for Plan mode
     const camera = new ArcRotateCamera(
       'camera',
-      -Math.PI / 2,
-      Math.PI / 3,
+      -Math.PI / 2,  // alpha: looking along -Y axis (front)
+      0.1,           // beta: almost 0 (top view, avoiding gimbal lock)
       20,
       Vector3.Zero(),
       scene
@@ -45,11 +47,44 @@ export const BabylonScene: React.FC<BabylonSceneProps> = ({ onSceneReady, onRend
     // Set Z as the up vector since we extrude along Z-axis
     camera.upVector = new Vector3(0, 0, 1);
 
+    // Start in orthographic mode for Plan view
+    camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+    const size = 20;
+    const aspectRatio = engine.getRenderWidth() / engine.getRenderHeight();
+    camera.orthoLeft = -size * aspectRatio;
+    camera.orthoRight = size * aspectRatio;
+    camera.orthoBottom = -size;
+    camera.orthoTop = size;
+
     camera.lowerRadiusLimit = 2;
     camera.upperRadiusLimit = 100;
     camera.wheelPrecision = 50;
     camera.panningSensibility = 50;
     camera.pinchPrecision = 50;
+
+    // Custom zoom handling for orthographic mode
+    canvas.addEventListener('wheel', (event) => {
+      if (camera.mode === Camera.ORTHOGRAPHIC_CAMERA) {
+        event.preventDefault();
+
+        // Zoom factor based on scroll direction
+        const zoomFactor = event.deltaY > 0 ? 1.1 : 0.9;
+
+        // Get current ortho size (based on top bound)
+        const currentSize = Math.abs(camera.orthoTop || 20);
+        const newSize = currentSize * zoomFactor;
+
+        // Clamp zoom limits (min 2, max 100)
+        const clampedSize = Math.max(2, Math.min(100, newSize));
+
+        // Update ortho bounds with proper aspect ratio
+        const aspectRatio = engine.getRenderWidth() / engine.getRenderHeight();
+        camera.orthoLeft = -clampedSize * aspectRatio;
+        camera.orthoRight = clampedSize * aspectRatio;
+        camera.orthoBottom = -clampedSize;
+        camera.orthoTop = clampedSize;
+      }
+    }, { passive: false });
 
     // Light
     const light = new HemisphericLight('light', new Vector3(0, 1, 0), scene);
@@ -66,8 +101,12 @@ export const BabylonScene: React.FC<BabylonSceneProps> = ({ onSceneReady, onRend
     gridMaterial.mainColor = new Color4(1, 1, 1, 1);
     gridMaterial.lineColor = new Color4(0.5, 0.5, 0.5, 1.0);
     gridMaterial.opacity = 0.98;
+    gridMaterial.zOffset = -10; // Render behind everything else
     ground.material = gridMaterial;
-    ground.position.z = -0.01; // Slightly below ground level (Z=0) to avoid z-fighting
+    ground.position.z = -0.5; // Well below ground level to avoid obscuring polygons in top view
+    ground.renderingGroupId = 0; // Render in background group
+    ground.isPickable = false; // Don't interfere with picking
+    ground.setEnabled(false); // Start hidden for Plan mode
 
     // Call onSceneReady
     onSceneReady(scene);

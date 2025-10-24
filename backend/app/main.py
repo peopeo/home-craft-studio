@@ -92,6 +92,57 @@ async def get_apartment_glb(apartment_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/apartment/{apartment_id}/polygons")
+async def get_apartment_polygons(apartment_id: str):
+    """Get apartment as 2D polygon data (for frontend extrusion)"""
+    try:
+        apartment_data = extractor.get_apartment_by_id(apartment_id)
+        if not apartment_data:
+            raise HTTPException(status_code=404, detail=f"Apartment with ID {apartment_id} not found")
+
+        # Convert polygon data to GeoJSON-like format
+        result = {
+            "apartment_id": apartment_id,
+            "areas": [],
+            "separators": [],
+            "openings": []
+        }
+
+        # Process areas
+        for area in apartment_data.get('areas', []):
+            result["areas"].append({
+                "id": area.get('area_id'),
+                "type": area.get('entity_subtype'),
+                "roomtype": area.get('roomtype'),
+                "zoning": area.get('zoning'),
+                "elevation": area.get('elevation', 0),
+                "height": area.get('height', 2.5),
+                "coordinates": area.get('coordinates', [])
+            })
+
+        # Process separators (walls)
+        for separator in apartment_data.get('separators', []):
+            result["separators"].append({
+                "type": separator.get('entity_subtype'),
+                "elevation": separator.get('elevation', 0),
+                "height": separator.get('height', 2.5),
+                "coordinates": separator.get('coordinates', [])
+            })
+
+        # Process openings (doors, windows)
+        for opening in apartment_data.get('openings', []):
+            result["openings"].append({
+                "type": opening.get('entity_subtype'),
+                "elevation": opening.get('elevation', 0),
+                "height": opening.get('height', 2.0),
+                "coordinates": opening.get('coordinates', [])
+            })
+
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/apartments")
 async def list_apartments(limit: int = 10):
     """List all apartment IDs (limited)"""
