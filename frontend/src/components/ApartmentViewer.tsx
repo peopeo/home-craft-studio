@@ -111,12 +111,12 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
     const meshes: Mesh[] = [];
     const is3D = mode === 'perspective' || mode === 'isometric';
 
-    // Render areas (rooms)
+    // Render areas (rooms) - always flat (floor polygons)
     polygonData.areas.forEach((area, idx) => {
       const meshName = `area_${idx}_${area.type}_${area.id || idx}`;
-      const mesh = is3D
-        ? create3DExtrudedPolygon(meshName, area, scene)
-        : create2DPolygon(meshName, area, scene, 0); // Base level
+      // Areas are always 2D (floors), use elevation in 3D mode
+      const zOffset = is3D ? area.elevation : 0;
+      const mesh = create2DPolygon(meshName, area, scene, zOffset);
 
       // Apply material
       const material = new StandardMaterial(`${meshName}_mat`, scene);
