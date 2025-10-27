@@ -90,9 +90,9 @@ export const BabylonScene: React.FC<BabylonSceneProps> = ({ onSceneReady, onRend
     const light = new HemisphericLight('light', new Vector3(0, 1, 0), scene);
     light.intensity = 0.9;
 
-    // Add grid helper - rotate to align with X-Y plane (since Z is up)
-    const ground = MeshBuilder.CreateGround('ground', { width: 50, height: 50 }, scene);
-    ground.rotation.x = Math.PI / 2; // Rotate 90° to make it horizontal in X-Y plane
+    // Add grid helper - Create a plane in X-Y (horizontal, since Z is up)
+    const ground = MeshBuilder.CreatePlane('ground', { width: 50, height: 50 }, scene);
+    // CreatePlane creates a plane in X-Y by default, which is what we want for Z-up
     const gridMaterial = new GridMaterial('gridMaterial', scene);
     gridMaterial.majorUnitFrequency = 5;
     gridMaterial.minorUnitVisibility = 0.45;
@@ -103,7 +103,7 @@ export const BabylonScene: React.FC<BabylonSceneProps> = ({ onSceneReady, onRend
     gridMaterial.opacity = 0.98;
     gridMaterial.zOffset = -10; // Render behind everything else
     ground.material = gridMaterial;
-    ground.position.z = -0.5; // Well below ground level to avoid obscuring polygons in top view
+    ground.position.z = -0.05; // Slightly below ground level (Z=0) to avoid z-fighting
     ground.renderingGroupId = 0; // Render in background group
     ground.isPickable = false; // Don't interfere with picking
     ground.setEnabled(false); // Start hidden for Plan mode

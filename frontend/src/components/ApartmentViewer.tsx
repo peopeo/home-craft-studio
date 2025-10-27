@@ -45,6 +45,7 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
   const [showWindows, setShowWindows] = useState(true);
   const [showGizmo, setShowGizmo] = useState(false);
   const [showAxes, setShowAxes] = useState(true);
+  const [showGrid, setShowGrid] = useState(true); // User preference for grid visibility
   const [viewMode, setViewMode] = useState<ViewMode>('plan');
 
   const sceneRef = useRef<Scene | null>(null);
@@ -54,8 +55,8 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
   const axesViewerRef = useRef<AxesViewer | null>(null);
   const polygonDataRef = useRef<ApartmentPolygonData | null>(null);
 
-  // Camera view presets for Z-up coordinate system (right-hand rule)
-  // X = right, Y = forward, Z = up (extrusion direction)
+  // Camera view presets (Babylon.js Y-up coordinate system)
+  // X = right, Y = up, Z = forward
   const setCameraView = useCallback((view: 'top' | 'front' | 'left' | 'right' | 'bottom' | 'isometric') => {
     if (!sceneRef.current?.activeCamera) return;
 
@@ -64,19 +65,19 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
 
     switch (view) {
       case 'top':
-        // Looking down the Z-axis (top view of floor plan)
+        // Looking down the Y-axis (top view of floor plan)
         camera.alpha = -Math.PI / 2;
         camera.beta = 0.1; // Almost 0 but not exactly (to avoid gimbal lock)
         camera.radius = radius;
         break;
       case 'bottom':
-        // Looking up the Z-axis
+        // Looking up the Y-axis
         camera.alpha = -Math.PI / 2;
         camera.beta = Math.PI - 0.1; // Almost π
         camera.radius = radius;
         break;
       case 'front':
-        // Looking along -Y axis (front view)
+        // Looking along -Z axis (front view)
         camera.alpha = -Math.PI / 2;
         camera.beta = Math.PI / 2; // Horizontal
         camera.radius = radius;
@@ -115,19 +116,23 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
     polygonData.areas.forEach((area, idx) => {
       const meshName = `area_${idx}_${area.type}_${area.id || idx}`;
       // Areas are always 2D (floors), use elevation in 3D mode
-      const zOffset = is3D ? area.elevation : 0;
+      // Add small offset (0.01) to lift floor slightly above grid
+      const zOffset = is3D ? (area.elevation + 0.01) : 0;
       const mesh = create2DPolygon(meshName, area, scene, zOffset);
 
       // Apply material
       const material = new StandardMaterial(`${meshName}_mat`, scene);
-      material.diffuseColor = getColorForType(area.type);
+      const areaColor = getColorForType(area.type);
+      material.diffuseColor = areaColor;
       material.alpha = getAlphaForType(area.type);
       material.backFaceCulling = false; // Render both sides
 
       // Add emissive color for better visibility (self-illuminating)
-      material.emissiveColor = getColorForType(area.type).scale(0.5); // 50% brightness
+      material.emissiveColor = areaColor.scale(0.5); // 50% brightness
 
       mesh.material = material;
+
+      console.log(`Created floor mesh ${meshName} at Y=${zOffset}, type='${area.type}', color RGB=(${areaColor.r}, ${areaColor.g}, ${areaColor.b})`);
 
       // Attach metadata for selection
       mesh.metadata = {
@@ -263,190 +268,121 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
         return;
       }
 
-      console.log(`Rendered ${meshes.length} meshes`);
-
-      // Transform apartment: center at origin, ground at Z=0, align with axes
+      // SIMPLIFIED: Just center the apartment at origin, no rotation
       if (meshes.length > 0) {
-        // Filter out root/transform nodes, only consider actual meshes
-        const actualMeshes = meshes.filter(m => m.getTotalVertices() > 0);
+        // Create a parent transform node for all meshes
+        const apartmentRoot = new TransformNode('apartmentRoot', scene);
 
-        if (actualMeshes.length > 0) {
-          // Create a parent transform node for all meshes
-          const apartmentRoot = new TransformNode('apartmentRoot', scene);
+        // Parent all loaded meshes to the transform node
+        meshes.forEach(mesh => {
+          mesh.parent = apartmentRoot;
+        });
 
-          // Parent all loaded meshes to the transform node
-          meshes.forEach(mesh => {
-            mesh.parent = apartmentRoot;
-          });
+        // Calculate simple bounding box (local coordinates only)
+        let minX = Infinity, maxX = -Infinity;
+        let minY = Infinity, maxY = -Infinity;
+        let minZ = Infinity, maxZ = -Infinity;
 
-          // Force initial matrix computation
-          apartmentRoot.computeWorldMatrix(true);
-          actualMeshes.forEach(m => m.computeWorldMatrix(true));
-
-          // Step 1: Calculate initial bounding box in world coordinates
-          let minX = Infinity, maxX = -Infinity;
-          let minY = Infinity, maxY = -Infinity;
-          let minZ = Infinity, maxZ = -Infinity;
-
-          actualMeshes.forEach(mesh => {
-            const positions = mesh.getVerticesData('position');
-            if (positions) {
-              for (let i = 0; i < positions.length; i += 3) {
-                const worldPos = Vector3.TransformCoordinates(
-                  new Vector3(positions[i], positions[i + 1], positions[i + 2]),
-                  mesh.getWorldMatrix()
-                );
-                minX = Math.min(minX, worldPos.x);
-                maxX = Math.max(maxX, worldPos.x);
-                minY = Math.min(minY, worldPos.y);
-                maxY = Math.max(maxY, worldPos.y);
-                minZ = Math.min(minZ, worldPos.z);
-                maxZ = Math.max(maxZ, worldPos.z);
-              }
-            }
-          });
-
-          const sizeX = maxX - minX;
-          const sizeY = maxY - minY;
-
-          console.log(`Initial bounding box: X[${minX.toFixed(2)}, ${maxX.toFixed(2)}] (${sizeX.toFixed(2)}), Y[${minY.toFixed(2)}, ${maxY.toFixed(2)}] (${sizeY.toFixed(2)}), Z[${minZ.toFixed(2)}, ${maxZ.toFixed(2)}]`);
-
-          // Step 2: Determine rotation needed by analyzing wall orientations
-          // Find dominant wall direction and align it with grid axes
-          let rotationAngle = 0;
-
-          if (polygonData.separators && polygonData.separators.length > 0) {
-            const angles: number[] = [];
-
-            // Analyze all wall segments
-            polygonData.separators.forEach(separator => {
-              const coords = separator.coordinates;
-              if (coords && coords.length >= 2) {
-                // For each wall, calculate the angle of its longest edge
-                for (let i = 0; i < coords.length - 1; i++) {
-                  const [x1, y1] = coords[i];
-                  const [x2, y2] = coords[i + 1];
-                  const dx = x2 - x1;
-                  const dy = y2 - y1;
-                  const length = Math.sqrt(dx * dx + dy * dy);
-
-                  // Only consider edges longer than 0.1 units
-                  if (length > 0.1) {
-                    const angle = Math.atan2(dy, dx);
-                    angles.push(angle);
-                  }
-                }
-              }
-            });
-
-            if (angles.length > 0) {
-              // Normalize angles to [0, π/2] by taking absolute values and modulo π/2
-              // This groups angles that are 90° apart (perpendicular walls)
-              const normalizedAngles = angles.map(a => {
-                let normalized = Math.abs(a) % (Math.PI / 2);
-                return normalized;
-              });
-
-              // Find the median angle (more robust than mean for this use case)
-              normalizedAngles.sort((a, b) => a - b);
-              const medianAngle = normalizedAngles[Math.floor(normalizedAngles.length / 2)];
-
-              // Determine rotation: snap to 0°, 45°, or 90° based on median
-              if (medianAngle < Math.PI / 8) {
-                // Walls are mostly horizontal/vertical, no rotation needed
-                rotationAngle = 0;
-                console.log(`Walls already aligned with grid (median angle: ${(medianAngle * 180 / Math.PI).toFixed(1)}°)`);
-              } else if (medianAngle > 3 * Math.PI / 8) {
-                // Walls are close to 90°, rotate by the angle to straighten
-                rotationAngle = Math.PI / 2 - medianAngle;
-                console.log(`Rotating ${(rotationAngle * 180 / Math.PI).toFixed(1)}° to align walls with grid (median angle was: ${(medianAngle * 180 / Math.PI).toFixed(1)}°)`);
-              } else {
-                // Walls are at an angle, rotate to align
-                rotationAngle = -medianAngle;
-                console.log(`Rotating ${(rotationAngle * 180 / Math.PI).toFixed(1)}° to align walls with grid (median angle was: ${(medianAngle * 180 / Math.PI).toFixed(1)}°)`);
-              }
-            } else {
-              console.log('No wall angles found, using bounding box method');
-              // Fallback to bounding box method
-              if (sizeY > sizeX) {
-                rotationAngle = Math.PI / 2;
-              }
-            }
-          } else {
-            console.log('No separators found, using bounding box method');
-            // Fallback to bounding box method
-            if (sizeY > sizeX) {
-              rotationAngle = Math.PI / 2;
+        meshes.forEach(mesh => {
+          const positions = mesh.getVerticesData('position');
+          if (positions) {
+            for (let i = 0; i < positions.length; i += 3) {
+              minX = Math.min(minX, positions[i]);
+              maxX = Math.max(maxX, positions[i]);
+              minY = Math.min(minY, positions[i + 1]);
+              maxY = Math.max(maxY, positions[i + 1]);
+              minZ = Math.min(minZ, positions[i + 2]);
+              maxZ = Math.max(maxZ, positions[i + 2]);
             }
           }
+        });
 
-          // Step 3: Apply rotation around the object's center
-          apartmentRoot.rotation.z = rotationAngle;
-          apartmentRoot.computeWorldMatrix(true);
-          actualMeshes.forEach(m => m.computeWorldMatrix(true));
+        // Calculate auto-alignment rotation based on dominant wall direction
+        let rotationAngle = 0;
 
-          // Step 4: Recalculate center after rotation
-          minX = Infinity; maxX = -Infinity;
-          minY = Infinity; maxY = -Infinity;
-          minZ = Infinity; maxZ = -Infinity;
+        // Find the longest wall segment to determine dominant orientation
+        let maxLength = 0;
+        let dominantAngle = 0;
 
-          actualMeshes.forEach(mesh => {
-            const positions = mesh.getVerticesData('position');
-            if (positions) {
-              for (let i = 0; i < positions.length; i += 3) {
-                const worldPos = Vector3.TransformCoordinates(
-                  new Vector3(positions[i], positions[i + 1], positions[i + 2]),
-                  mesh.getWorldMatrix()
-                );
-                minX = Math.min(minX, worldPos.x);
-                maxX = Math.max(maxX, worldPos.x);
-                minY = Math.min(minY, worldPos.y);
-                maxY = Math.max(maxY, worldPos.y);
-                minZ = Math.min(minZ, worldPos.z);
-                maxZ = Math.max(maxZ, worldPos.z);
-              }
+        polygonData.separators.forEach(separator => {
+          const coords = separator.coordinates;
+          for (let i = 0; i < coords.length - 1; i++) {
+            const [x1, y1] = coords[i];
+            const [x2, y2] = coords[i + 1];
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const length = Math.sqrt(dx * dx + dy * dy);
+
+            if (length > maxLength) {
+              maxLength = length;
+              dominantAngle = Math.atan2(dy, dx);
             }
-          });
+          }
+        });
 
-          const newCenterX = (minX + maxX) / 2;
-          const newCenterY = (minY + maxY) / 2;
-          const newGroundZ = minZ;
+        // Use exact angle to align with axis (no snapping)
+        const angleInDegrees = (dominantAngle * 180) / Math.PI;
+        rotationAngle = -dominantAngle; // Negative to align with axis
 
-          // Step 5: Translate to origin (center at 0,0 and ground slightly above grid)
-          apartmentRoot.position.x = -newCenterX;
-          apartmentRoot.position.y = -newCenterY;
-          apartmentRoot.position.z = -newGroundZ + 0.01; // +0.01 to sit above grid at Z=-0.01
+        console.log('Auto-align: dominant angle =', angleInDegrees.toFixed(3), '°, rotation =', (rotationAngle * 180 / Math.PI).toFixed(3), '°');
 
-          console.log(`Moved to origin: translation (${apartmentRoot.position.x.toFixed(2)}, ${apartmentRoot.position.y.toFixed(2)}, ${apartmentRoot.position.z.toFixed(2)})`);
+        // Apply rotation before centering
+        apartmentRoot.rotation.z = rotationAngle;
 
-          // Force final matrix update
-          apartmentRoot.computeWorldMatrix(true);
-          meshes.forEach(mesh => mesh.computeWorldMatrix(true));
+        // Recompute world matrices after rotation
+        apartmentRoot.computeWorldMatrix(true);
+        meshes.forEach(m => m.computeWorldMatrix(true));
 
-          // Store apartment root for gizmo attachment
-          apartmentRootRef.current = apartmentRoot;
+        // Recalculate bounds after rotation to center properly
+        minX = Infinity; maxX = -Infinity;
+        minY = Infinity; maxY = -Infinity;
+        minZ = Infinity; maxZ = -Infinity;
 
-          // Create gizmo manager
-          const utilLayer = UtilityLayerRenderer.DefaultUtilityLayer;
-          const gizmoManager = new GizmoManager(scene, 1, utilLayer);
-          gizmoManager.positionGizmoEnabled = false;
-          gizmoManager.rotationGizmoEnabled = false;
-          gizmoManager.scaleGizmoEnabled = false;
-          gizmoManager.boundingBoxGizmoEnabled = false;
-          gizmoManager.attachToMesh(apartmentRoot);
-          gizmoManagerRef.current = gizmoManager;
+        meshes.forEach(mesh => {
+          const positions = mesh.getVerticesData('position');
+          if (positions) {
+            for (let i = 0; i < positions.length; i += 3) {
+              const worldPos = Vector3.TransformCoordinates(
+                new Vector3(positions[i], positions[i + 1], positions[i + 2]),
+                mesh.getWorldMatrix()
+              );
+              minX = Math.min(minX, worldPos.x);
+              maxX = Math.max(maxX, worldPos.x);
+              minY = Math.min(minY, worldPos.y);
+              maxY = Math.max(maxY, worldPos.y);
+              minZ = Math.min(minZ, worldPos.z);
+              maxZ = Math.max(maxZ, worldPos.z);
+            }
+          }
+        });
 
-          console.log('Gizmo manager created and attached to apartment root');
+        // Center and ground the apartment (Z is up, floor is X-Y plane)
+        apartmentRoot.position.x = -(minX + maxX) / 2;
+        apartmentRoot.position.y = -(minY + maxY) / 2;
+        apartmentRoot.position.z = -minZ; // Ground lowest point at Z=0
 
-          // Create 3D axes viewer at origin
-          const axesViewer = new AxesViewer(scene, 2); // 2 units size
-          axesViewerRef.current = axesViewer;
-          console.log('Axes viewer created at origin');
+        console.log('Apartment positioned - bounds after rotation:', { minX, maxX, minY, maxY, minZ, maxZ });
+        console.log('Apartment root position:', apartmentRoot.position, 'rotation:', apartmentRoot.rotation.z);
 
-          // Set camera to look at origin
-          scene.activeCamera?.setTarget(Vector3.Zero());
+        // Store apartment root for gizmo attachment
+        apartmentRootRef.current = apartmentRoot;
 
-          console.log('Apartment transformed: centered, grounded, and aligned');
+        // Create gizmo manager
+        const utilLayer = UtilityLayerRenderer.DefaultUtilityLayer;
+        const gizmoManager = new GizmoManager(scene, 1, utilLayer);
+        gizmoManager.positionGizmoEnabled = false;
+        gizmoManager.rotationGizmoEnabled = false;
+        gizmoManager.scaleGizmoEnabled = false;
+        gizmoManager.boundingBoxGizmoEnabled = false;
+        gizmoManager.attachToMesh(apartmentRoot);
+        gizmoManagerRef.current = gizmoManager;
+
+        // Create 3D axes viewer at origin
+        const axesViewer = new AxesViewer(scene, 2); // 2 units size
+        axesViewerRef.current = axesViewer;
+
+        // Set camera to look at origin
+        scene.activeCamera?.setTarget(Vector3.Zero());
 
           // Add debug markers
           // // 1. World origin marker (RED)
@@ -493,7 +429,6 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
           // apartmentOriginMarker.material = apartmentOriginMat;
           // console.log(`Apartment center marker (GREEN) at (${postCenterX.toFixed(2)}, ${postCenterY.toFixed(2)}, ${postCenterZ.toFixed(2)})`);
           // console.log(`Ground level at Z=${postMinZ.toFixed(2)}`);
-        }
       }
 
       // Setup click handler
@@ -523,6 +458,14 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
         }
       });
 
+      // Initialize grid state based on current React state
+      const ground = scene.getMeshByName('ground');
+      if (ground) {
+        const shouldEnable = viewMode !== 'plan' && showGrid;
+        console.log('onSceneReady - initializing grid state:', { viewMode, showGrid, shouldEnable });
+        ground.setEnabled(shouldEnable);
+      }
+
       setLoading(false);
 
     } catch (err) {
@@ -530,7 +473,7 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
       setError(`Error: ${err}`);
       setLoading(false);
     }
-  }, [apartmentId, viewMode, renderApartment]);
+  }, [apartmentId, viewMode, renderApartment, showGrid]);
 
   // Toggle visibility functions
   const toggleWalls = useCallback(() => {
@@ -549,7 +492,6 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
         wallCount++;
       }
     });
-    console.log(`Toggled ${wallCount} walls to ${newShowWalls ? 'visible' : 'hidden'}`);
   }, [showWalls]);
 
   const toggleDoors = useCallback(() => {
@@ -568,7 +510,6 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
         doorCount++;
       }
     });
-    console.log(`Toggled ${doorCount} doors to ${newShowDoors ? 'visible' : 'hidden'}`);
   }, [showDoors]);
 
   const toggleWindows = useCallback(() => {
@@ -587,7 +528,6 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
         windowCount++;
       }
     });
-    console.log(`Toggled ${windowCount} windows to ${newShowWindows ? 'visible' : 'hidden'}`);
   }, [showWindows]);
 
   const toggleGizmo = useCallback(() => {
@@ -599,7 +539,6 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
     setShowGizmo(newShowGizmo);
 
     gizmoManagerRef.current.rotationGizmoEnabled = newShowGizmo;
-    console.log(`Rotation gizmo ${newShowGizmo ? 'enabled' : 'disabled'}`);
   }, [showGizmo]);
 
   const toggleAxes = useCallback(() => {
@@ -614,9 +553,28 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
     axesViewerRef.current.xAxis.setEnabled(newShowAxes);
     axesViewerRef.current.yAxis.setEnabled(newShowAxes);
     axesViewerRef.current.zAxis.setEnabled(newShowAxes);
-
-    console.log(`Axes viewer ${newShowAxes ? 'shown' : 'hidden'}`);
   }, [showAxes]);
+
+  const toggleGrid = useCallback(() => {
+    if (!sceneRef.current) {
+      console.log('No scene available');
+      return;
+    }
+    const newShowGrid = !showGrid;
+    setShowGrid(newShowGrid);
+
+    const ground = sceneRef.current.getMeshByName('ground');
+    console.log('Toggle grid - ground mesh:', ground, 'isEnabled before:', ground?.isEnabled(), 'newShowGrid:', newShowGrid, 'viewMode:', viewMode);
+    if (ground) {
+      // Only show grid in 3D modes (not in Plan mode)
+      const shouldEnable = newShowGrid && viewMode !== 'plan';
+      console.log('Setting ground.setEnabled to:', shouldEnable);
+      ground.setEnabled(shouldEnable);
+      console.log('Ground isEnabled after:', ground.isEnabled());
+    } else {
+      console.warn('Ground mesh not found!');
+    }
+  }, [showGrid, viewMode]);
 
   const setViewModeAndCamera = useCallback((newMode: ViewMode) => {
     if (!sceneRef.current?.activeCamera) {
@@ -627,13 +585,6 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
     setViewMode(newMode);
 
     const camera = sceneRef.current.activeCamera as any;
-
-    // Hide/show grid based on view mode
-    const ground = sceneRef.current.getMeshByName('ground');
-    if (ground) {
-      // Hide grid in plan mode to avoid obscuring the floor plan
-      ground.setEnabled(newMode !== 'plan');
-    }
 
     // Set camera mode based on view mode
     if (newMode === 'plan') {
@@ -649,8 +600,6 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
       // Set camera to top view
       camera.alpha = -Math.PI / 2;
       camera.beta = 0.1; // Almost 0 but not exactly (to avoid gimbal lock)
-
-      console.log('Switched to Plan view (orthographic, top-down)');
     } else if (newMode === 'isometric') {
       // Isometric view uses orthographic projection at an angle
       camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
@@ -661,20 +610,19 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
       camera.orthoBottom = -size;
       camera.orthoTop = size;
 
-      // Set camera to isometric angle
-      camera.alpha = -Math.PI / 4;
-      camera.beta = Math.PI / 3;
-
-      console.log('Switched to Isometric view (orthographic)');
+      // Set camera to isometric angle (classic isometric: 45° horizontal, 35.264° vertical)
+      camera.alpha = -Math.PI / 4; // 45° from side
+      camera.beta = Math.PI / 3;   // 60° from top (30° from horizontal)
     } else {
       // Perspective view uses perspective projection
       camera.mode = Camera.PERSPECTIVE_CAMERA;
 
-      // Set camera to 3D view angle
-      camera.alpha = -Math.PI / 4;
-      camera.beta = Math.PI / 3;
+      // Standard FOV for natural perspective
+      camera.fov = 0.8; // ~45.8 degrees
 
-      console.log('Switched to Perspective view');
+      // Set camera to nice viewing angle
+      camera.alpha = -Math.PI / 4; // 45° rotation
+      camera.beta = Math.PI / 3;   // 60° from top
     }
 
     // Re-render meshes if we have polygon data
@@ -692,143 +640,120 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
         apartmentRootRef.current = null;
       }
 
-      // Render new meshes
+      // Render new meshes and apply same transformation as initial load
       const meshes = renderApartment(sceneRef.current, polygonDataRef.current, newMode);
 
-      // Transform apartment (same logic as onSceneReady)
-      if (meshes.length > 0) {
-        const actualMeshes = meshes.filter(m => m.getTotalVertices() > 0);
+      if (meshes.length > 0 && polygonDataRef.current) {
+        const apartmentRoot = new TransformNode('apartmentRoot', sceneRef.current);
+        meshes.forEach(mesh => { mesh.parent = apartmentRoot; });
 
-        if (actualMeshes.length > 0) {
-          const apartmentRoot = new TransformNode('apartmentRoot', sceneRef.current);
-          meshes.forEach(mesh => { mesh.parent = apartmentRoot; });
+        // Calculate initial bounding box
+        let minX = Infinity, maxX = -Infinity;
+        let minY = Infinity, maxY = -Infinity;
+        let minZ = Infinity, maxZ = -Infinity;
 
-          apartmentRoot.computeWorldMatrix(true);
-          actualMeshes.forEach(m => m.computeWorldMatrix(true));
-
-          // Calculate bounding box and center/align
-          let minX = Infinity, maxX = -Infinity;
-          let minY = Infinity, maxY = -Infinity;
-          let minZ = Infinity, maxZ = -Infinity;
-
-          actualMeshes.forEach(mesh => {
-            const positions = mesh.getVerticesData('position');
-            if (positions) {
-              for (let i = 0; i < positions.length; i += 3) {
-                const worldPos = Vector3.TransformCoordinates(
-                  new Vector3(positions[i], positions[i + 1], positions[i + 2]),
-                  mesh.getWorldMatrix()
-                );
-                minX = Math.min(minX, worldPos.x);
-                maxX = Math.max(maxX, worldPos.x);
-                minY = Math.min(minY, worldPos.y);
-                maxY = Math.max(maxY, worldPos.y);
-                minZ = Math.min(minZ, worldPos.z);
-                maxZ = Math.max(maxZ, worldPos.z);
-              }
-            }
-          });
-
-          const sizeX = maxX - minX;
-          const sizeY = maxY - minY;
-
-          // Rotate based on wall orientations
-          let rotationAngle = 0;
-
-          if (polygonDataRef.current.separators && polygonDataRef.current.separators.length > 0) {
-            const angles: number[] = [];
-
-            // Analyze all wall segments
-            polygonDataRef.current.separators.forEach(separator => {
-              const coords = separator.coordinates;
-              if (coords && coords.length >= 2) {
-                for (let i = 0; i < coords.length - 1; i++) {
-                  const [x1, y1] = coords[i];
-                  const [x2, y2] = coords[i + 1];
-                  const dx = x2 - x1;
-                  const dy = y2 - y1;
-                  const length = Math.sqrt(dx * dx + dy * dy);
-
-                  if (length > 0.1) {
-                    const angle = Math.atan2(dy, dx);
-                    angles.push(angle);
-                  }
-                }
-              }
-            });
-
-            if (angles.length > 0) {
-              const normalizedAngles = angles.map(a => {
-                let normalized = Math.abs(a) % (Math.PI / 2);
-                return normalized;
-              });
-
-              normalizedAngles.sort((a, b) => a - b);
-              const medianAngle = normalizedAngles[Math.floor(normalizedAngles.length / 2)];
-
-              if (medianAngle < Math.PI / 8) {
-                rotationAngle = 0;
-              } else if (medianAngle > 3 * Math.PI / 8) {
-                rotationAngle = Math.PI / 2 - medianAngle;
-              } else {
-                rotationAngle = -medianAngle;
-              }
-            } else {
-              if (sizeY > sizeX) {
-                rotationAngle = Math.PI / 2;
-              }
-            }
-          } else {
-            if (sizeY > sizeX) {
-              rotationAngle = Math.PI / 2;
+        meshes.forEach(mesh => {
+          const positions = mesh.getVerticesData('position');
+          if (positions) {
+            for (let i = 0; i < positions.length; i += 3) {
+              minX = Math.min(minX, positions[i]);
+              maxX = Math.max(maxX, positions[i]);
+              minY = Math.min(minY, positions[i + 1]);
+              maxY = Math.max(maxY, positions[i + 1]);
+              minZ = Math.min(minZ, positions[i + 2]);
+              maxZ = Math.max(maxZ, positions[i + 2]);
             }
           }
+        });
 
-          apartmentRoot.rotation.z = rotationAngle;
-          apartmentRoot.computeWorldMatrix(true);
-          actualMeshes.forEach(m => m.computeWorldMatrix(true));
+        // Calculate auto-alignment rotation based on dominant wall direction
+        let rotationAngle = 0;
 
-          // Recalculate bounds after rotation
-          minX = Infinity; maxX = -Infinity;
-          minY = Infinity; maxY = -Infinity;
-          minZ = Infinity; maxZ = -Infinity;
+        // Find the longest wall segment to determine dominant orientation
+        let maxLength = 0;
+        let dominantAngle = 0;
 
-          actualMeshes.forEach(mesh => {
-            const positions = mesh.getVerticesData('position');
-            if (positions) {
-              for (let i = 0; i < positions.length; i += 3) {
-                const worldPos = Vector3.TransformCoordinates(
-                  new Vector3(positions[i], positions[i + 1], positions[i + 2]),
-                  mesh.getWorldMatrix()
-                );
-                minX = Math.min(minX, worldPos.x);
-                maxX = Math.max(maxX, worldPos.x);
-                minY = Math.min(minY, worldPos.y);
-                maxY = Math.max(maxY, worldPos.y);
-                minZ = Math.min(minZ, worldPos.z);
-                maxZ = Math.max(maxZ, worldPos.z);
-              }
+        polygonDataRef.current.separators.forEach(separator => {
+          const coords = separator.coordinates;
+          for (let i = 0; i < coords.length - 1; i++) {
+            const [x1, y1] = coords[i];
+            const [x2, y2] = coords[i + 1];
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const length = Math.sqrt(dx * dx + dy * dy);
+
+            if (length > maxLength) {
+              maxLength = length;
+              dominantAngle = Math.atan2(dy, dx);
             }
-          });
-
-          // Center and ground (slightly above grid)
-          apartmentRoot.position.x = -(minX + maxX) / 2;
-          apartmentRoot.position.y = -(minY + maxY) / 2;
-          apartmentRoot.position.z = -minZ + 0.01; // +0.01 to sit above grid at Z=-0.01
-
-          apartmentRoot.computeWorldMatrix(true);
-          meshes.forEach(mesh => mesh.computeWorldMatrix(true));
-
-          apartmentRootRef.current = apartmentRoot;
-
-          // Reattach gizmo
-          if (gizmoManagerRef.current) {
-            gizmoManagerRef.current.attachToMesh(apartmentRoot);
           }
+        });
+
+        // Use exact angle to align with axis (no snapping)
+        const angleInDegrees = (dominantAngle * 180) / Math.PI;
+        rotationAngle = -dominantAngle; // Negative to align with axis
+
+        console.log('setViewModeAndCamera - Auto-align: dominant angle =', angleInDegrees.toFixed(3), '°, rotation =', (rotationAngle * 180 / Math.PI).toFixed(3), '°');
+
+        // Apply rotation before centering
+        apartmentRoot.rotation.z = rotationAngle;
+
+        // Recalculate bounds after rotation
+        apartmentRoot.computeWorldMatrix(true);
+        meshes.forEach(m => m.computeWorldMatrix(true));
+
+        minX = Infinity; maxX = -Infinity;
+        minY = Infinity; maxY = -Infinity;
+        minZ = Infinity; maxZ = -Infinity;
+
+        meshes.forEach(mesh => {
+          const positions = mesh.getVerticesData('position');
+          if (positions) {
+            for (let i = 0; i < positions.length; i += 3) {
+              const worldPos = Vector3.TransformCoordinates(
+                new Vector3(positions[i], positions[i + 1], positions[i + 2]),
+                mesh.getWorldMatrix()
+              );
+              minX = Math.min(minX, worldPos.x);
+              maxX = Math.max(maxX, worldPos.x);
+              minY = Math.min(minY, worldPos.y);
+              maxY = Math.max(maxY, worldPos.y);
+              minZ = Math.min(minZ, worldPos.z);
+              maxZ = Math.max(maxZ, worldPos.z);
+            }
+          }
+        });
+
+        // Center and ground - Y is up now, floor is X-Z plane
+        apartmentRoot.position.x = -(minX + maxX) / 2;
+        apartmentRoot.position.y = -minY; // Ground lowest point at Y=0
+        apartmentRoot.position.z = -(minZ + maxZ) / 2;
+
+        apartmentRootRef.current = apartmentRoot;
+
+        console.log('View switched - apartment re-centered and grounded');
+
+        // Reattach gizmo
+        if (gizmoManagerRef.current) {
+          gizmoManagerRef.current.attachToMesh(apartmentRoot);
         }
       }
     }
-  }, [renderApartment]);
+
+    // Update grid visibility AFTER all mesh rendering is complete
+    const ground = sceneRef.current.getMeshByName('ground');
+    console.log('setViewModeAndCamera (end) - ground:', ground, 'isEnabled before:', ground?.isEnabled(), 'newMode:', newMode, 'showGrid:', showGrid);
+    if (ground) {
+      // Hide grid in plan mode to avoid obscuring the floor plan
+      // Also respect user's grid visibility preference
+      const shouldEnable = newMode !== 'plan' && showGrid;
+      console.log('Setting ground.setEnabled to:', shouldEnable);
+      ground.setEnabled(shouldEnable);
+      console.log('Ground isEnabled after:', ground.isEnabled());
+    } else {
+      console.warn('Ground mesh not found in setViewModeAndCamera!');
+    }
+  }, [renderApartment, showGrid]);
 
   return (
     <div style={{ width: '100%', height: '100vh', position: 'relative' }}>
@@ -955,6 +880,22 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
             }}
           >
             {showAxes ? '✓ ' : '✗ '} 3D Axes
+          </button>
+          <button
+            onClick={toggleGrid}
+            style={{
+              padding: '10px',
+              backgroundColor: showGrid ? '#00BCD4' : '#ccc',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontSize: '14px',
+              opacity: viewMode === 'plan' ? 0.5 : 1,
+            }}
+            title={viewMode === 'plan' ? 'Grid only shows in 3D modes (Perspective/Isometric)' : 'Toggle grid visibility'}
+          >
+            {showGrid ? '✓ ' : '✗ '} Grid {viewMode === 'plan' ? '(3D only)' : ''}
           </button>
         </div>
 
