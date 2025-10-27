@@ -589,7 +589,7 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
     // Set camera mode based on view mode
     if (newMode === 'plan') {
       // Plan view uses orthographic projection looking down
-      camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+      camera.mode = 0; // ORTHOGRAPHIC_CAMERA
       const size = camera.radius || 20;
       const aspectRatio = sceneRef.current.getEngine().getRenderWidth() / sceneRef.current.getEngine().getRenderHeight();
       camera.orthoLeft = -size * aspectRatio;
@@ -599,10 +599,12 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
 
       // Set camera to top view
       camera.alpha = -Math.PI / 2;
-      camera.beta = 0.1; // Almost 0 but not exactly (to avoid gimbal lock)
+      camera.beta = 0.001; // Very close to 0 for true top-down view (avoiding exact 0 to prevent gimbal lock)
+
+      console.log('Switched to PLAN mode - camera.mode:', camera.mode);
     } else if (newMode === 'isometric') {
       // Isometric view uses orthographic projection at an angle
-      camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+      camera.mode = 0; // ORTHOGRAPHIC_CAMERA
       const size = camera.radius || 20;
       const aspectRatio = sceneRef.current.getEngine().getRenderWidth() / sceneRef.current.getEngine().getRenderHeight();
       camera.orthoLeft = -size * aspectRatio;
@@ -613,9 +615,12 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
       // Set camera to isometric angle (classic isometric: 45° horizontal, 35.264° vertical)
       camera.alpha = -Math.PI / 4; // 45° from side
       camera.beta = Math.PI / 3;   // 60° from top (30° from horizontal)
+
+      console.log('Switched to ISOMETRIC mode - camera.mode:', camera.mode);
     } else {
       // Perspective view uses perspective projection
-      camera.mode = Camera.PERSPECTIVE_CAMERA;
+      // Use numeric value 1 for PERSPECTIVE_CAMERA mode
+      camera.mode = 1; // PERSPECTIVE_CAMERA
 
       // Standard FOV for natural perspective
       camera.fov = 0.8; // ~45.8 degrees
@@ -623,6 +628,8 @@ export const ApartmentViewer: React.FC<ApartmentViewerProps> = ({ apartmentId })
       // Set camera to nice viewing angle
       camera.alpha = -Math.PI / 4; // 45° rotation
       camera.beta = Math.PI / 3;   // 60° from top
+
+      console.log('Switched to PERSPECTIVE mode - camera.mode:', camera.mode, 'fov:', camera.fov);
     }
 
     // Re-render meshes if we have polygon data

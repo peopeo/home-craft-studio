@@ -37,7 +37,7 @@ export const BabylonScene: React.FC<BabylonSceneProps> = ({ onSceneReady, onRend
     const camera = new ArcRotateCamera(
       'camera',
       -Math.PI / 2,  // alpha: looking along -Y axis (front)
-      0.1,           // beta: almost 0 (top view, avoiding gimbal lock)
+      0.001,         // beta: very close to 0 for true top-down view (avoiding gimbal lock)
       20,
       Vector3.Zero(),
       scene
@@ -47,8 +47,11 @@ export const BabylonScene: React.FC<BabylonSceneProps> = ({ onSceneReady, onRend
     // Set Z as the up vector since we extrude along Z-axis
     camera.upVector = new Vector3(0, 0, 1);
 
+    // Set FOV for perspective mode (will be used when switching to perspective)
+    camera.fov = 0.8; // ~45.8 degrees
+
     // Start in orthographic mode for Plan view
-    camera.mode = Camera.ORTHOGRAPHIC_CAMERA;
+    camera.mode = 0; // ORTHOGRAPHIC_CAMERA
     const size = 20;
     const aspectRatio = engine.getRenderWidth() / engine.getRenderHeight();
     camera.orthoLeft = -size * aspectRatio;
@@ -64,7 +67,7 @@ export const BabylonScene: React.FC<BabylonSceneProps> = ({ onSceneReady, onRend
 
     // Custom zoom handling for orthographic mode
     canvas.addEventListener('wheel', (event) => {
-      if (camera.mode === Camera.ORTHOGRAPHIC_CAMERA) {
+      if (camera.mode === 0) { // ORTHOGRAPHIC_CAMERA
         event.preventDefault();
 
         // Zoom factor based on scroll direction
